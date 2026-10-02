@@ -1,6 +1,6 @@
 # RefereeLink football telemetry gateway
 
-Original C11 software for the **BP-TWR-30 three-anchor/one-tag** UART output and the current **Yahboom IMU-Sensor 6/9/10-axis** UART output. It decodes distances and sensor X/Y/Z acceleration, rejects malformed frames and passes complete accepted manufacturer frames to a board-selected transport callback. No vendor firmware or SDK is bundled.
+Original C11 software for the **BP-TWR-30 three-anchor/one-tag** UART output and the current **Yahboom IMU-Sensor 6/9/10-axis** UART output. It decodes distances, sensor acceleration/angular velocity, magnetic counts, quaternion/Euler attitude and ten-axis barometer data, rejects malformed frames and passes complete accepted manufacturer frames to a board-selected transport callback. No vendor firmware or SDK is bundled.
 
 **Hardware has not arrived and has not been tested.** This repository is a portable integration layer, not a ready-to-flash project for an unidentified board. MCU model, physical pins, voltage levels, UART instances, clocks, interrupt priorities and host transport are supplied by the actual Cube/HAL project. The matching showcase backend computes same-plane 2D tag position and shows acceleration/history; it never claims full-pitch football ground-truth accuracy or measured altitude.
 
@@ -15,7 +15,9 @@ Files:
 - `tests/`: portable parser/overflow tests, a clearly identified HAL stub and black-box bridge tests.
 - [HAL integration](docs/HAL_INTEGRATION.md), [protocol evidence](docs/PROTOCOLS.md), [software validation](docs/VALIDATION.md).
 
-Software checks on a remote Linux host (C11 compiler, make and Python 3.12+):
+The IMU protocol review of 2026-10-03 adds distinct sample kinds for raw (`04`), quaternion (`16`), Euler (`26`) and barometer (`32`) telemetry. Consumers must rebuild against the updated header and inspect the kind before reading sample fields. The showcase UI currently displays acceleration only; the additional profiles are preserved by this gateway for consumers that support them. Sensor variants and installation orientation still need hardware confirmation.
+
+Software checks require a C11 compiler, make and Python 3.12+:
 
 ```sh
 make test PYTHON=/path/to/python
