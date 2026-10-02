@@ -1,0 +1,15 @@
+build/
+*.o
+
+# Captures, credentials and generated firmware artifacts
+.env
+.env.*
+!.env.example
+captures/
+*.bin
+*.elf
+*.hex
+*.map
+*.log
+
+.DS_Store
