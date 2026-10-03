@@ -13,8 +13,13 @@ typedef enum { RF_UWB = 0, RF_IMU = 1 } rf_channel;
 typedef enum {
     RF_REJECT_NONE = 0, RF_REJECT_FRAMING, RF_REJECT_LENGTH,
     RF_REJECT_CHECKSUM, RF_REJECT_RANGE, RF_REJECT_THREE_ANCHOR,
-    RF_REJECT_TAG
+    RF_REJECT_TAG, RF_REJECT_VALUE
 } rf_rejection;
+
+typedef enum {
+    RF_IMU_RAW = 0x04, RF_IMU_QUATERNION = 0x16,
+    RF_IMU_EULER = 0x26, RF_IMU_BAROMETER = 0x32
+} rf_imu_kind;
 
 typedef struct {
     uint8_t tag_id;
@@ -22,8 +27,23 @@ typedef struct {
     float ranges_m[3];
 } rf_uwb_sample;
 typedef struct {
+    float relative_height_m; /* Relative to the sensor position at startup. */
+    float temperature_c;
+    float pressure_pa;
+    float reference_pressure_pa; /* Reference pressure at startup. */
+} rf_imu_barometer;
+typedef struct {
+    /* Only the fields belonging to kind are valid; other fields are zero. */
+    /* RF_IMU_RAW: sensor X/Y/Z; acceleration includes gravity. */
     int16_t raw_xyz[3];
-    float acceleration_m_s2[3]; /* Sensor X/Y/Z, includes gravity. */
+    float acceleration_m_s2[3];
+    rf_imu_kind kind;
+    int16_t gyro_raw_xyz[3];
+    float angular_velocity_rad_s[3];
+    int16_t magnetometer_raw_xyz[3]; /* Counts; no physical magnetic unit inferred. */
+    float quaternion_wxyz[4]; /* RF_IMU_QUATERNION: w, x, y, z. */
+    float euler_rad[3]; /* RF_IMU_EULER: roll, pitch, yaw in radians. */
+    rf_imu_barometer barometer; /* RF_IMU_BAROMETER; 10-axis sensor only. */
 } rf_imu_sample;
 typedef struct {
     rf_channel channel;
@@ -70,7 +90,7 @@ typedef struct {
 } rf_gateway;
 
 rf_config rf_default_config(void);
-/* Returns zero if the selected C11 atomics are not lock-free on this target. */
+/* Returns zero for invalid configuration, unsupported float layout or non-lock-free atomics. */
 int rf_gateway_init(rf_gateway *gateway, rf_config config,
                     rf_frame_sink sink, void *context);
 /* ISR-safe SPSC enqueue; returns accepted byte count; drops newest when full. */

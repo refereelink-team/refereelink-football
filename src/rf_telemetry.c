@@ -1,10 +1,16 @@
 /* Original implementation, Copyright (c) 2026 RefereeLink contributors. MIT. */
 #include "rf_telemetry.h"
+#include <float.h>
+#include <limits.h>
 #include <math.h>
 #include <string.h>
 
 _Static_assert((RF_RING_CAPACITY & (RF_RING_CAPACITY - 1u)) == 0u,
                "ring size must be power of two");
+_Static_assert(CHAR_BIT == 8 && sizeof(float) == sizeof(uint32_t) &&
+               FLT_RADIX == 2 && FLT_MANT_DIG == 24 &&
+               FLT_MIN_EXP == -125 && FLT_MAX_EXP == 128,
+               "IMU float decoding requires IEEE-754 binary32");
 
 static uint16_t le16(const uint8_t *p) {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
@@ -13,6 +19,38 @@ static int16_t signed_le16(const uint8_t *p) {
     uint16_t u = le16(p);
     int32_t signed_value = u >= 32768u ? (int32_t)u - 65536 : (int32_t)u;
     return (int16_t)signed_value;
+}
+static int imu_float_layout_supported(void) {
+    /* Binary32 dimensions alone do not establish native integer/float byte order. */
+    const float one = 1.0f, negative_zero = -0.0f;
+    uint32_t one_bits, negative_zero_bits;
+    memcpy(&one_bits, &one, sizeof(one_bits));
+    memcpy(&negative_zero_bits, &negative_zero, sizeof(negative_zero_bits));
+    return one_bits == UINT32_C(0x3f800000) &&
+           negative_zero_bits == UINT32_C(0x80000000);
+}
+static int finite_le_floats(const uint8_t *p, float *values, size_t count) {
+    if (!imu_float_layout_supported()) return 0;
+    for (size_t i = 0; i < count; ++i) {
+        const uint8_t *bytes = p + 4u * i;
+        uint32_t bits = (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) |
+                        ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
+        /* Reject NaN and either infinity before creating a float object. */
+        if ((bits & UINT32_C(0x7f800000)) == UINT32_C(0x7f800000)) return 0;
+        memcpy(values + i, &bits, sizeof(bits));
+    }
+    return 1;
+}
+static size_t imu_expected_length(uint8_t function) {
+    switch (function) {
+        case RF_IMU_RAW: return 23u;
+        case RF_IMU_QUATERNION: return 21u;
+        case RF_IMU_EULER: return 17u;
+        case RF_IMU_BAROMETER: return 21u;
+        case 0x01u: return 8u; /* Firmware version response, ignored. */
+        case 0x81u: return 7u; /* Command status response, ignored. */
+        default: return 0u;
+    }
 }
 rf_config rf_default_config(void) {
     rf_config c = {5u, 0.2f, 30.0f};
@@ -41,7 +79,10 @@ static void parse_available(rf_parser *p, rf_frame_sink sink, void *context) {
         }
         if (p->used < 4u) return;
         size_t length = p->channel == RF_UWB ? 16u : p->bytes[2];
-        if (length < 5u || length > RF_FRAME_CAPACITY) {
+        size_t expected = p->channel == RF_IMU ? imu_expected_length(p->bytes[3]) : 0u;
+        /* Known IMU profiles have fixed lengths, even when fragmented. */
+        if (length < 5u || length > RF_FRAME_CAPACITY ||
+                (expected && length != expected)) {
             reject(p, RF_REJECT_LENGTH);
             discard(p, 1u);
             continue;
@@ -78,15 +119,46 @@ static void parse_available(rf_parser *p, rf_frame_sink sink, void *context) {
                 discard(p, 1u);
                 continue;
             }
-            if (p->bytes[3] != 0x04u) { discard(p, length); continue; }
-            if (length != 23u) reason = RF_REJECT_LENGTH;
-            if (reason == RF_REJECT_NONE) {
-                for (size_t i = 0; i < 3u; ++i) {
-                    int16_t raw = signed_le16(p->bytes + 4u + 2u * i);
-                    sample.value.imu.raw_xyz[i] = raw;
-                    sample.value.imu.acceleration_m_s2[i] =
-                        (float)raw * (16.0f / 32767.0f) * RF_STANDARD_GRAVITY;
+            rf_imu_sample *imu = &sample.value.imu;
+            switch (p->bytes[3]) {
+                case RF_IMU_RAW:
+                    imu->kind = RF_IMU_RAW;
+                    for (size_t i = 0; i < 3u; ++i) {
+                        int16_t raw = signed_le16(p->bytes + 4u + 2u * i);
+                        int16_t gyro = signed_le16(p->bytes + 10u + 2u * i);
+                        imu->raw_xyz[i] = raw;
+                        imu->acceleration_m_s2[i] =
+                            (float)raw * (16.0f / 32767.0f) * RF_STANDARD_GRAVITY;
+                        imu->gyro_raw_xyz[i] = gyro;
+                        imu->angular_velocity_rad_s[i] = (float)gyro *
+                            (2000.0f / 32767.0f) * (3.14159265358979323846f / 180.0f);
+                        imu->magnetometer_raw_xyz[i] = signed_le16(p->bytes + 16u + 2u * i);
+                    }
+                    break;
+                case RF_IMU_QUATERNION:
+                    imu->kind = RF_IMU_QUATERNION;
+                    if (!finite_le_floats(p->bytes + 4u, imu->quaternion_wxyz, 4u))
+                        reason = RF_REJECT_VALUE;
+                    break;
+                case RF_IMU_EULER:
+                    imu->kind = RF_IMU_EULER;
+                    if (!finite_le_floats(p->bytes + 4u, imu->euler_rad, 3u))
+                        reason = RF_REJECT_VALUE;
+                    break;
+                case RF_IMU_BAROMETER: {
+                    float values[4];
+                    imu->kind = RF_IMU_BAROMETER;
+                    if (!finite_le_floats(p->bytes + 4u, values, 4u)) {
+                        reason = RF_REJECT_VALUE;
+                    } else {
+                        imu->barometer.relative_height_m = values[0];
+                        imu->barometer.temperature_c = values[1];
+                        imu->barometer.pressure_pa = values[2];
+                        imu->barometer.reference_pressure_pa = values[3];
+                    }
+                    break;
                 }
+                default: discard(p, length); continue;
             }
         }
         if (reason != RF_REJECT_NONE) reject(p, reason);
@@ -110,7 +182,8 @@ void rf_parser_feed(rf_parser *p, const uint8_t *data, size_t length,
     }
 }
 int rf_gateway_init(rf_gateway *g, rf_config config, rf_frame_sink sink, void *context) {
-    if (!g || !isfinite(config.minimum_range_m) || !isfinite(config.maximum_range_m) ||
+    if (!g || !imu_float_layout_supported() ||
+            !isfinite(config.minimum_range_m) || !isfinite(config.maximum_range_m) ||
             config.minimum_range_m < 0.2f || config.maximum_range_m > 30.0f ||
             config.maximum_range_m < config.minimum_range_m)
         return 0;

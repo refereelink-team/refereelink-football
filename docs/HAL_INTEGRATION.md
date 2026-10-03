@@ -45,7 +45,20 @@ Call `Application_TelemetryPoll()` regularly from the main loop or one dedicated
 
 The output callback receives `(context, channel, frame, length, parsed_sample)`. `frame` and `parsed_sample` are borrowed for **the duration of the callback only**. Copy the bytes into your own bounded transmit queue before returning if using DMA, USB or asynchronous network output. Never save these pointers for later transmission. On queue-full, drop explicitly and expose your output-drop counter; do not block indefinitely in the processing loop.
 
-Use a separate host stream/device for each channel and configure those actual host ports in the showcase's `serial.uwb` and `serial.imu` settings. Output bytes must remain the original 16-byte UWB or 23-byte raw-IMU packet. Do not append debug strings to the same binary stream. A board with insufficient UARTs may provide an independently designed USB transport; this code does not configure USB descriptors or promise two CDC devices.
+Use a separate host stream/device for each channel and configure those actual host ports in the showcase's `serial.uwb` and `serial.imu` settings. Output bytes must remain the original 16-byte UWB packets or supported IMU packets: 23-byte raw, 21-byte quaternion, 17-byte Euler and 21-byte barometer. An IMU stream may interleave these profiles. Do not append debug strings to the same binary stream. A board with insufficient UARTs may provide an independently designed USB transport; this code does not configure USB descriptors or promise two CDC devices.
+
+The IMU sample structure grew in the 2026-10-03 protocol update. Rebuild every consumer and inspect its sample kind before reading raw acceleration or any attitude/barometer payload; inactive fields contain zero and are not measurements. Callbacks that only forward the borrowed frame bytes need no profile-specific conversion. The adapter remains receive-only and performs no calibration, algorithm changes or sensor resets.
+
+For `sample->channel == RF_IMU`, inspect `sample->value.imu.kind`:
+
+| Kind | Valid sample fields |
+| --- | --- |
+| `RF_IMU_RAW` | `raw_xyz`, `acceleration_m_s2`, `gyro_raw_xyz`, `angular_velocity_rad_s`, `magnetometer_raw_xyz` |
+| `RF_IMU_QUATERNION` | `quaternion_wxyz` |
+| `RF_IMU_EULER` | `euler_rad` (roll, pitch, yaw) |
+| `RF_IMU_BAROMETER` | `barometer.relative_height_m`, `barometer.temperature_c`, `barometer.pressure_pa`, `barometer.reference_pressure_pa` |
+
+The decoder requires 32-bit IEEE 754 binary32 floats. Compile-time checks verify their size, radix, precision and exponent range; a native bit-layout check of `1.0f` and `-0.0f` must also pass before gateway initialization or float decoding. Non-finite float payloads are rejected with `RF_REJECT_VALUE`; malformed known telemetry lengths are rejected with `RF_REJECT_LENGTH`.
 
 The working host `serial_bridge` example demonstrates the same callback contract using a binary stdout sink. Its source can be reviewed and tested without constructing a USB or network protocol.
 
